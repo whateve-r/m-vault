@@ -1,0 +1,44 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# VSCode / IDE configs
+.vscode/
+.idea/
+*.iml
+
+# Git
+.git/
+.gitignore
+
+# Node/npm (if not used, optional)
+node_modules/
+npm-debug.log
+
+# Docker
+.dockerignore
+Dockerfile*
+docker-compose*
+
+# Secrets / local config
+.env
+*.yaml
+*.yml
+secrets.*
+values.*
+
+# Build artifacts
+build/
+dist/
+*.egg-info
+
+# Database
+*.db
+*.sqlite3

@@ -1,0 +1,1 @@
+# CCXT API wrapper for cryptocurrency exchanges
