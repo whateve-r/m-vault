@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 env/
 venv/
+.env
 
 # VSCode / IDE configs
 .vscode/
@@ -42,3 +43,5 @@ dist/
 # Database
 *.db
 *.sqlite3
+data/*.sqlite
+data/secret.key

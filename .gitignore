@@ -1,4 +1,4 @@
-# Ignore environment files
+# ignore environment files
 .env
 .env.local
 .env.development
@@ -7,9 +7,12 @@
 .env.staging
 .env.*
 
-# Ignore Python virtual environment
+# ignore Python virtual environment
 .venv/
 venv/
 env/
 
-# Hello World
+# database
+
+data/*.sqlite
+data/secret.key
