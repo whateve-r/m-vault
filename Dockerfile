@@ -29,4 +29,4 @@ RUN adduser -u 5678 --disabled-password --gecos "" appuser && \
 USER appuser
 
 # Default command
-CMD ["python", "bot/main.py"]
+CMD ["python", "-m", "bot/main.py"]

@@ -1,11 +1,15 @@
 # telegram bot entry point
 
+import sys
 import os
 import sqlite3
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from dotenv import load_dotenv
 from core.vault import encrypt_api_key, decrypt_api_key
+from bot.handlers import start, help_command, connect, button_handler  # Importar las funciones necesarias
+
+# Add project root to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Load environment variables
 load_dotenv()
@@ -27,43 +31,19 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Telegram commands
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Welcome to m‑vault!\nUse /help to see available commands.")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 Commands:\n"
-        "/start - Start the bot\n"
-        "/help - Show help\n"
-        "/connect <API_KEY> <API_SECRET> - Save exchange API keys"
-    )
-
-async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        api_key, api_secret = context.args
-        enc_key = encrypt_api_key(api_key)
-        enc_secret = encrypt_api_key(api_secret)
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO users (telegram_id, api_key, api_secret) VALUES (?, ?, ?)",
-            (update.effective_user.id, enc_key, enc_secret)
-        )
-        conn.commit()
-        conn.close()
-        await update.message.reply_text("✅ API keys saved securely!")
-    except ValueError:
-        await update.message.reply_text("❌ Usage: /connect <API_KEY> <API_SECRET>")
-
 def main():
-    init_db()
+    # Initialize the application
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("connect", connect))
+
+    # Add handlers to the app after initialization
+    app.add_handler(CommandHandler("start", start))  # Bot Start Command
+    app.add_handler(CommandHandler("help", help_command))  # Help Command
+    app.add_handler(CommandHandler("connect", connect))  # Connect API keys
+    app.add_handler(CallbackQueryHandler(button_handler))  # Button Callback
+
     print("🤖 m‑vault is running...")
     app.run_polling()
 
 if __name__ == "__main__":
+    init_db()  # Initialize the database before running the bot
     main()
