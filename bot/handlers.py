@@ -1,133 +1,93 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from core.portfolio import get_portfolio_summary
+from core.strategies import list_strategies
+from core.market import get_symbol_data
+from core.vault import encrypt_api_key
+import sqlite3, os
 
-# Define the start function that shows the inline keyboard with buttons
+DB_PATH = os.getenv("DB_PATH", "data/db.sqlite")
+
+# Main menu
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        # Category 1: Trading Options
-        [InlineKeyboardButton("📦 Portfolio", callback_data='portfolio'), 
+        [InlineKeyboardButton("📦 Portfolio", callback_data='portfolio'),
          InlineKeyboardButton("📊 Strategies", callback_data='strategies')],
-        
-        # Category 2: Backtesting & Papertrade
-        [InlineKeyboardButton("🔁 Backtest", callback_data='backtest'), 
+        [InlineKeyboardButton("🔁 Backtest", callback_data='backtest'),
          InlineKeyboardButton("🧪 Papertrade", callback_data='papertrade')],
-        
-        # Category 3: Market Data & Indicators
-        [InlineKeyboardButton("📈 Signals", callback_data='signals'), 
+        [InlineKeyboardButton("📈 Signals", callback_data='signals'),
          InlineKeyboardButton("📉 Indicators", callback_data='indicators')],
-        
-        # Add a "Back to Menu" button if the user is in a sub-category
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]
+        [InlineKeyboardButton("📊 Get Symbol Data", callback_data='symbol')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "👋 *Welcome to m‑vault!*\n\nSelect an option below:",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
 
-# Define placeholder functions for each button (for demonstration)
+    # Detect if called from /start or a button press
+    if update.message:
+        await update.message.reply_text(
+            "👋 *Welcome to m‑vault!*\n\nSelect an option below:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(
+            "👋 *Welcome back to m‑vault!*\n\nSelect an option below:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+# Portfolio
 async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]
-    ]
+    user_id = update.effective_user.id
+    summary = get_portfolio_summary(user_id)
+    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    # Hide the keyboard when entering the module
-    await update.callback_query.edit_message_text(
-        "📦 Portfolio module coming soon...",
-        reply_markup=reply_markup
-    )
-    await update.message.delete()  # Delete the user's text message, forcing them to use the buttons only
+    await update.callback_query.edit_message_text(summary, reply_markup=reply_markup)
 
+# Strategies
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]
-    ]
+    strategies = list_strategies()
+    message = "📊 *Available Strategies:*\n" + "\n".join([f"• {s}" for s in strategies])
+    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        "📊 Strategies module coming soon...",
-        reply_markup=reply_markup
-    )
-    await update.message.delete()  # Prevent text input
+    await update.callback_query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
 
-async def backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        "🔁 Backtest module coming soon...",
-        reply_markup=reply_markup
+# Get Symbol Data (live API)
+async def get_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.edit_message_text(
+        "🔎 Please send me the symbol you want to check (e.g., BTC/USDT):"
     )
-    await update.message.delete()  # Prevent text input
+    context.user_data['awaiting_symbol'] = True
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('awaiting_symbol'):
+        symbol = update.message.text.upper()
+        context.user_data['awaiting_symbol'] = False
+        data = get_symbol_data(symbol)
+        await update.message.reply_text(data, parse_mode='Markdown')
+    else:
+        await update.message.reply_text("⚠️ Please use the menu buttons.")
+
+
+# Placeholders
+async def backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_placeholder(update, "🔁 Backtest module coming soon...")
 
 async def papertrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        "🧪 Papertrade module coming soon...",
-        reply_markup=reply_markup
-    )
-    await update.message.delete()  # Prevent text input
+    await send_placeholder(update, "🧪 Papertrade module coming soon...")
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        "📈 Signals module coming soon...",
-        reply_markup=reply_markup
-    )
-    await update.message.delete()  # Prevent text input
+    await send_placeholder(update, "📈 Signals module coming soon...")
 
 async def indicators(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]
-    ]
+    await send_placeholder(update, "📉 Indicators module coming soon...")
+
+async def send_placeholder(update: Update, message: str):
+    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        "📉 Indicators module coming soon...",
-        reply_markup=reply_markup
-    )
-    await update.message.delete()  # Prevent text input
+    await update.callback_query.edit_message_text(message, reply_markup=reply_markup)
 
-# Define the help command
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 Commands:\n"
-        "/start - Start the bot\n"
-        "/help - Show help\n"
-        "/connect <API_KEY> <API_SECRET> - Save exchange API keys"
-    )
-
-# Handle button presses
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()  # Acknowledge the button press
-    data = query.data
-
-    # Handle each button press dynamically
-    if data == 'portfolio':
-        await portfolio(update, context)
-    elif data == 'strategies':
-        await strategies(update, context)
-    elif data == 'backtest':
-        await backtest(update, context)
-    elif data == 'papertrade':
-        await papertrade(update, context)
-    elif data == 'signals':
-        await signals(update, context)
-    elif data == 'indicators':
-        await indicators(update, context)
-    elif data == 'back_to_menu':
-        await start(update, context)  # Return to the main menu
-    else:
-        await query.edit_message_text("⚠️ Unknown command.")
-
-# Definición de la función connect
+# Connect API keys
 async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         api_key, api_secret = context.args
@@ -144,3 +104,40 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ API keys saved securely!")
     except ValueError:
         await update.message.reply_text("❌ Usage: /connect <API_KEY> <API_SECRET>")
+
+# Button handler
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == 'portfolio':
+        await portfolio(update, context)
+    elif data == 'strategies':
+        await strategies(update, context)
+    elif data == 'backtest':
+        await backtest(update, context)
+    elif data == 'papertrade':
+        await papertrade(update, context)
+    elif data == 'signals':
+        await signals(update, context)
+    elif data == 'indicators':
+        await indicators(update, context)
+    elif data == 'symbol':
+        await get_symbol(update, context)
+    elif data == 'back_to_menu':
+        await start(update, context)
+    else:
+        await query.edit_message_text("⚠️ Unknown command.")
+
+
+# Show help message
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 *m‑vault Commands:*\n"
+        "/start - Start the bot and show menu\n"
+        "/help - Show this help message\n"
+        "/connect <API_KEY> <API_SECRET> - Save your exchange API keys securely\n"
+        "\nUse the menu buttons to navigate modules.",
+        parse_mode='Markdown'
+    )
