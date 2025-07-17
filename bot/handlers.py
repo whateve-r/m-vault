@@ -1,7 +1,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from core.portfolio import get_portfolio_summary
-from core.strategies import list_strategies
+from core.strategies.strategies import list_strategies
 from core.market import get_symbol_data
 from core.vault import encrypt_api_key
 import sqlite3, os
@@ -41,7 +41,26 @@ async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     summary = get_portfolio_summary(user_id)
     keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(summary, reply_markup=reply_markup)
+   
+    # Shows a temporary message while fetching portfolio
+    await update.callback_query.edit_message_text(
+        "Fetching your portfolio...",
+        reply_markup=reply_markup)
+    
+    try:
+        summary = get_portfolio_summary(user_id)
+        await update.callback_query.edit_message_text(
+            summary,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.callback_query.edit_message_text(
+            f"⚠️ Error fetching portfolio: {str(e)}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
 
 # Strategies
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -88,22 +107,70 @@ async def send_placeholder(update: Update, message: str):
     await update.callback_query.edit_message_text(message, reply_markup=reply_markup)
 
 # Connect API keys
-async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        api_key, api_secret = context.args
-        enc_key = encrypt_api_key(api_key)
-        enc_secret = encrypt_api_key(api_secret)
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO users (telegram_id, api_key, api_secret) VALUES (?, ?, ?)",
-            (update.effective_user.id, enc_key, enc_secret)
-        )
-        conn.commit()
-        conn.close()
-        await update.message.reply_text("✅ API keys saved securely!")
-    except ValueError:
-        await update.message.reply_text("❌ Usage: /connect <API_KEY> <API_SECRET>")
+#async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#    try:
+#        api_key, api_secret = context.args
+#        enc_key = encrypt_api_key(api_key)
+#        enc_secret = encrypt_api_key(api_secret)
+#        conn = sqlite3.connect(DB_PATH)
+#        c = conn.cursor()
+#        c.execute(
+#            "INSERT OR REPLACE INTO users (telegram_id, api_key, api_secret) VALUES (?, ?, ?)",
+#            (update.effective_user.id, enc_key, enc_secret)
+#        )
+#        conn.commit()
+#        conn.close()
+#        await update.message.reply_text("✅ API keys saved securely!")
+#    except ValueError:
+#        await update.message.reply_text("❌ Usage: /connect <API_KEY> <API_SECRET>")
+
+
+# Connect API keys
+
+# Step 1: Start connection flow
+
+async def connect_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.edit_message_text(
+        "🔗 Please send me your *Binance API key*:",
+        parse_mode='Markdown'
+    )
+    return "WAITING_API_KEY"
+
+# Step 2: Receive API key
+async def receive_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['api_key'] = update.message.text.strip()
+    await update.message.reply_text(
+        "🔗 Now please send me your *Binance API secret*:",
+        parse_mode='Markdown'
+    )
+    return "WAITING_API_SECRET"
+
+# Step 3: Receive API secret and save
+from core.vault import encrypt_api_key, encrypt_api_secret
+import sqlite3
+
+async def receive_api_secret(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    api_secret = update.message.text.strip()
+    user_id = update.effective_user.id
+
+   if not api_key:
+    await update.message.reply_text("❌ API key is missing. Please start over with /connect.")
+    return ConversationHandler.END
+
+    # Encrypt and save API keys
+    enc_key = encrypt_api_key(api_key)
+    enc_secret = encrypt_api_secret(api_secret)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO users (telegram_id, api_key, api_secret) VALUES (?, ?, ?)",
+        (update.effective_user.id, enc_key, enc_secret)
+    )
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text("✅ API keys saved securely! You can now use M-VAULT.")
+    return ConversationHandler.END
 
 # Button handler
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
