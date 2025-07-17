@@ -22,7 +22,7 @@ def get_user(user_id:int):
 def get_portfolio_summary(user_id: int) -> str:
     user = get_user(user_id)
     if not user or not user['api_key'] or not user['api_secret']:
-        return "❌ No API keys found. Please connect your account using /connect <API_KEY> <API_SECRET>"
+        return "❌ No API keys found. Please connect your account using 'Connect API Keys' option."
     
     try:
         exchange = ccxt.binance({
@@ -52,7 +52,7 @@ def get_portfolio_summary(user_id: int) -> str:
         return (
             f"📊 *Portfolio for User ID {user_id}*\n"
             f"Total Value: ${total_usd:.2f}\n\n"
-            f"Holdingr:\n{details if details else 'None'}"
+            f"Holdings:\n{details if details else 'None'}"
         )
     except Exception as e:
         return f"❌ Error fetching portfolio: {str(e)}"
