@@ -2,7 +2,9 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters # <-- ADDED ConversationHandler, MessageHandler, filters
 from core.portfolio import get_portfolio_summary
-from core.strategies import generate_charts
+from core.strategies import get_strategies_data, generate_charts
+from core.strategies.arbitrage import TriangularArbitrage
+from core.strategies.multi_asset import CrossAssetMomentum
 from core.market import get_symbol_data
 from core.vault import encrypt_api_key, decrypt_api_key # <-- Ensured decrypt_api_key is also here
 from bot.constants import WAITING_API_KEY, WAITING_API_SECRET # <-- States imported correctly

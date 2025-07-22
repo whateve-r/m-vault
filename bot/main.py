@@ -73,3 +73,10 @@ def main():
 if __name__ == "__main__":
     init_db()  # Initialize the database before running the bot
     main()
+
+c.execute('''
+    INSERT OR IGNORE INTO strategies (user_id, strategy_name, invested_amount, pnl_percent, active)
+    VALUES (123456, 'BTC-DCA', 1200, 8.5, 1),
+           (123456, 'ETH-Momentum', 800, -2.1, 1),
+           (123456, 'Triangular Arbitrage', 1500, 3.7, 1)
+''')
