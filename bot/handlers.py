@@ -2,12 +2,12 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters # <-- ADDED ConversationHandler, MessageHandler, filters
 from core.portfolio import get_portfolio_summary
-from core.strategies import get_strategies_data, generate_charts
+from core.strategies.strategies import get_strategies_data, generate_charts
 from core.strategies.arbitrage import TriangularArbitrage
 from core.strategies.multi_asset import CrossAssetMomentum
 from core.market import get_symbol_data
 from core.vault import encrypt_api_key, decrypt_api_key # <-- Ensured decrypt_api_key is also here
-from bot.constants import WAITING_API_KEY, WAITING_API_SECRET # <-- States imported correctly
+from bot.constants import WAITING_API_KEY, WAITING_API_SECRET, WAITING_STRATEGY_NAME, WAITING_STRATEGY_COINS, WAITING_STRATEGY_AMOUNT
 import sqlite3, os
 
 DB_PATH = os.getenv("DB_PATH", "data/db.sqlite")
@@ -77,14 +77,100 @@ async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Strategies
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    chart1, chart2 = generate_charts(user_id)
-    
-    if chart1 and chart2:
-        await update.callback_query.edit_message_text("📊 Active Strategies Overview:")
-        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=chart1, caption="📈 PnL per Strategy")
-        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=chart2, caption="🥧 Portfolio Exposure")
-    else:
-        await update.callback_query.edit_message_text("❌ No active strategies found.")
+    data = get_strategies_data(user_id)
+
+    if not data:
+        await update.callback_query.edit_message_text(
+            "❌ No strategies found.\n\nUse ⚙️ Configure Strategy to create one."
+        )
+        return
+
+    # Generar lista de estrategias con estado
+    text = "📊 *Your Strategies:*\n"
+    keyboard = []
+    for strat in data:
+        name, active = strat[0], "✅" if strat[4] else "❌"
+        text += f"{active} {name}\n"
+        # Botón toggle
+        keyboard.append([InlineKeyboardButton(f"{active} {name}", callback_data=f"toggle_{name}")])
+
+    # Opciones adicionales
+    keyboard += [
+        [InlineKeyboardButton("📈 View PnL Graph", callback_data='view_pnl')],
+        [InlineKeyboardButton("🥧 View Exposure Pie Chart", callback_data='view_exposure')],
+        [InlineKeyboardButton("⚙️ Configure Strategy", callback_data='configure_strategy')],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.callback_query.edit_message_text(
+        text, reply_markup=reply_markup, parse_mode='Markdown'
+    )
+
+async def toggle_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    strategy_name = query.data.replace("toggle_", "")
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    # Cambiar estado activo
+    c.execute('''
+        UPDATE strategies
+        SET active = CASE WHEN active = 1 THEN 0 ELSE 1 END
+        WHERE user_id = ? AND strategy_name = ?
+    ''', (user_id, strategy_name))
+    conn.commit()
+    conn.close()
+
+    await query.answer(f"Toggled {strategy_name}")
+    await strategies(update, context)  # Refrescar lista
+
+async def configure_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.edit_message_text(
+        "📛 Send the name of the new strategy:"
+    )
+    return WAITING_STRATEGY_NAME
+
+async def receive_strategy_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['strategy_name'] = update.message.text.strip()
+    await update.message.reply_text(
+        "💱 Enter the coins for this strategy (comma-separated, e.g., BTC,ETH,SOL):"
+    )
+    return WAITING_STRATEGY_COINS
+
+async def receive_strategy_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['coins'] = update.message.text.strip().upper()
+    await update.message.reply_text(
+        "💰 Enter the amount to invest in USD:"
+    )
+    return WAITING_STRATEGY_AMOUNT
+
+async def receive_strategy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    name = context.user_data['strategy_name']
+    coins = context.user_data['coins']
+    try:
+        amount = float(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid amount. Please enter a numeric value.")
+        return WAITING_STRATEGY_AMOUNT
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO strategies (user_id, strategy_name, invested_amount, pnl_percent, active)
+        VALUES (?, ?, ?, 0.0, 1)
+    ''', (user_id, f"{name} ({coins})", amount))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        f"✅ Strategy *{name}* added and activated!",
+        parse_mode='Markdown'
+    )
+    return ConversationHandler.END
+
 
 # Get Symbol Data (live API)
 async def get_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):

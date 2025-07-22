@@ -31,6 +31,7 @@ def init_db():
     os.makedirs("data", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # Tabla de usuarios
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             telegram_id INTEGER PRIMARY KEY,
@@ -41,8 +42,32 @@ def init_db():
             last_fee_date TEXT
         )
     ''')
+
+    # 🔥 Tabla de estrategias
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            strategy_name TEXT,
+            invested_amount REAL,
+            pnl_percent REAL,
+            active INTEGER DEFAULT 1,
+            FOREIGN KEY (user_id) REFERENCES users (telegram_id)
+        )
+    ''')
+
+    # 🧪 Datos dummy para testear
+    c.execute('''
+        INSERT OR IGNORE INTO strategies (user_id, strategy_name, invested_amount, pnl_percent, active)
+        VALUES
+            (123456, 'BTC-DCA', 1200, 8.5, 1),
+            (123456, 'ETH-Momentum', 800, -2.1, 1),
+            (123456, 'Triangular Arbitrage', 1500, 3.7, 1)
+    ''')
+    
     conn.commit()
     conn.close()
+
 
 def main():
     # Initialize the application
@@ -74,9 +99,13 @@ if __name__ == "__main__":
     init_db()  # Initialize the database before running the bot
     main()
 
-c.execute('''
-    INSERT OR IGNORE INTO strategies (user_id, strategy_name, invested_amount, pnl_percent, active)
-    VALUES (123456, 'BTC-DCA', 1200, 8.5, 1),
-           (123456, 'ETH-Momentum', 800, -2.1, 1),
-           (123456, 'Triangular Arbitrage', 1500, 3.7, 1)
-''')
+strategy_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(configure_strategy, pattern='^configure_strategy$')],
+    states={
+        WAITING_STRATEGY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_strategy_name)],
+        WAITING_STRATEGY_COINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_strategy_coins)],
+        WAITING_STRATEGY_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_strategy_amount)],
+    },
+    fallbacks=[CommandHandler("start", start)],
+)
+app.add_handler(strategy_handler)
