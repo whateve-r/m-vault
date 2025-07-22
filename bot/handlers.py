@@ -2,7 +2,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters # <-- ADDED ConversationHandler, MessageHandler, filters
 from core.portfolio import get_portfolio_summary
-from core.strategies.strategies import list_strategies
+from core.strategies import generate_charts
 from core.market import get_symbol_data
 from core.vault import encrypt_api_key, decrypt_api_key # <-- Ensured decrypt_api_key is also here
 from bot.constants import WAITING_API_KEY, WAITING_API_SECRET # <-- States imported correctly
@@ -74,11 +74,15 @@ async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Strategies
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    strategies_list = list_strategies() # Changed variable name to avoid conflict with function name
-    message = "📊 *Available Strategies:*\n" + "\n".join([f"• {s}" for s in strategies_list])
-    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    user_id = update.effective_user.id
+    chart1, chart2 = generate_charts(user_id)
+    
+    if chart1 and chart2:
+        await update.callback_query.edit_message_text("📊 Active Strategies Overview:")
+        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=chart1, caption="📈 PnL per Strategy")
+        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=chart2, caption="🥧 Portfolio Exposure")
+    else:
+        await update.callback_query.edit_message_text("❌ No active strategies found.")
 
 # Get Symbol Data (live API)
 async def get_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
