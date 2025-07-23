@@ -5,3 +5,5 @@ ccxt
 requests
 matplotlib
 python-binance
+numpy
+nest_asyncio
