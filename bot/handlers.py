@@ -1,133 +1,240 @@
 # bot/handlers.py
+import os
+import sqlite3
+from io import BytesIO # For chart generation
+import re # For extracting strategy names from filenames
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters # <-- ADDED ConversationHandler, MessageHandler, filters
+from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters
+
 from core.portfolio import get_portfolio_summary
-from core.strategies.strategies import get_strategies_data, generate_charts
-from core.strategies.arbitrage import TriangularArbitrage
-from core.strategies.multi_asset import CrossAssetMomentum
+from core.strategies.strategies import get_strategies_data, generate_charts # Added generate_charts
 from core.market import get_symbol_data
-from core.vault import encrypt_api_key, decrypt_api_key # <-- Ensured decrypt_api_key is also here
+from core.vault import encrypt_api_key, decrypt_api_key
 from bot.constants import WAITING_API_KEY, WAITING_API_SECRET, WAITING_STRATEGY_NAME, WAITING_STRATEGY_COINS, WAITING_STRATEGY_AMOUNT
-import sqlite3, os
 
 DB_PATH = os.getenv("DB_PATH", "data/db.sqlite")
+STRATEGIES_FOLDER = "core/strategies/" # Path to your strategies folder
 
 
 # Main menu
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("📦 Portfolio", callback_data='portfolio'),
-        InlineKeyboardButton("📊 Strategies", callback_data='strategies')],
+        [InlineKeyboardButton("📦 Portfolio", callback_data='portfolio')],
+        [InlineKeyboardButton("📋 My Strategies", callback_data='my_strategies'),
+         InlineKeyboardButton("📈 Strategies Presets", callback_data='browse_strategies')], # New button for presets
         [InlineKeyboardButton("🔁 Backtest", callback_data='backtest'),
-        InlineKeyboardButton("🧪 Papertrade", callback_data='papertrade')],
+         InlineKeyboardButton("🧪 Papertrade", callback_data='papertrade')],
         [InlineKeyboardButton("📈 Signals", callback_data='signals'),
-        InlineKeyboardButton("📉 Indicators", callback_data='indicators')],
+         InlineKeyboardButton("📉 Indicators", callback_data='indicators')],
         [InlineKeyboardButton("📊 Get Symbol Data", callback_data='symbol')],
-        [InlineKeyboardButton("🔗 Connect API Keys", callback_data='connect_api')], # <-- Added icon for consistency
-
+        [InlineKeyboardButton("🔗 Connect API Keys", callback_data='connect_api')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # Detect if called from /start or a button press
     if update.message:
         await update.message.reply_text(
-            "👋 *Welcome to m‑vault!*\n\nSelect an option below:",
+            "👋 *Welcome to M-VAULT!*\n\nSelect an option below:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
-        )     
+        )
     elif update.callback_query:
         await update.callback_query.edit_message_text(
-        "👋 *Welcome back to m‑vault!*\n\nSelect an option below:",
+        "👋 *Welcome back to M-VAULT!*\n\nSelect an option below:",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
 
-# Portfolio
+# Portfolio summary
 async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    query = update.callback_query
     keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Shows a temporary message while fetching portfolio
-    await update.callback_query.edit_message_text(
+    await query.edit_message_text(
         "Fetching your portfolio...",
         reply_markup=reply_markup
     )
 
     try:
-        summary = get_portfolio_summary(user_id)
-        # Updated message for no API keys (assuming get_portfolio_summary returns this specific string)
+        summary = get_portfolio_summary(query.from_user.id)
         if "❌ No API keys found" in summary:
-            summary += "\n\nPlease connect your account using the 'Connect API Keys' button in the main menu (/start)."
+            summary += "\n\nPlease connect your account using the '🔗 Connect API Keys' button in the main menu (/start)."
 
-        await update.callback_query.edit_message_text(
-        summary,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-        
+        await query.edit_message_text(
+            summary,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
     except Exception as e:
-        await update.callback_query.edit_message_text(
+        await query.edit_message_text(
             f"⚠️ Error fetching portfolio: {str(e)}",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
 
+# My Strategies menu
+async def my_strategies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    strategies_data = get_strategies_data(user_id) # Uses the correctly imported function
 
-# Strategies
-async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    data = get_strategies_data(user_id)
-
-    if not data:
-        await update.callback_query.edit_message_text(
-            "❌ No strategies found.\n\nUse ⚙️ Configure Strategy to create one."
-        )
-        return
-
-    # Generar lista de estrategias con estado
-    text = "📊 *Your Strategies:*\n"
     keyboard = []
-    for strat in data:
-        name, active = strat[0], "✅" if strat[4] else "❌"
-        text += f"{active} {name}\n"
-        # Botón toggle
-        keyboard.append([InlineKeyboardButton(f"{active} {name}", callback_data=f"toggle_{name}")])
+    text = "📊 *Your Strategies:*\n"
 
-    # Opciones adicionales
+    if not strategies_data:
+        text = "❌ No strategies found.\n\n_Strategies will be available as presets from M-VAULT._"
+    else:
+        for strat in strategies_data:
+            # Assuming strat is (id, user_id, strategy_name, coins, invested_amount, pnl_percent, active)
+            strategy_id, _, name, coins, invested, pnl, active = strat
+            active_status = "✅" if active else "❌"
+            text += f"{active_status} {name} (Coins: {coins}, Invested: ${invested:.2f}, PnL: {pnl:.2f}%)\n"
+            keyboard.append([InlineKeyboardButton(f"{active_status} {name}", callback_data=f"toggle_strategy_{strategy_id}")])
+
+    # Nested 'Situation' button for charts
     keyboard += [
-        [InlineKeyboardButton("📈 View PnL Graph", callback_data='view_pnl')],
-        [InlineKeyboardButton("🥧 View Exposure Pie Chart", callback_data='view_exposure')],
-        [InlineKeyboardButton("⚙️ Configure Strategy", callback_data='configure_strategy')],
+        [InlineKeyboardButton("📊 Situation", callback_data='my_strategies_situation')],
         [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.callback_query.edit_message_text(
+    await query.edit_message_text(
         text, reply_markup=reply_markup, parse_mode='Markdown'
+    )
+
+# New function for the nested 'Situation' menu
+async def my_strategies_situation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    keyboard = [
+        [InlineKeyboardButton("📈 View PnL Graph", callback_data='view_pnl_graph')],
+        [InlineKeyboardButton("🥧 View Exposure Pie Chart", callback_data='view_exposure_chart')],
+        [InlineKeyboardButton("🔙 Back to My Strategies", callback_data='my_strategies')], # Go back to my_strategies_command
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        "📊 *Strategy Situation:*\n\nChoose a view:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
     )
 
 async def toggle_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = update.effective_user.id
-    strategy_name = query.data.replace("toggle_", "")
+    user_id = query.from_user.id
+    try:
+        strategy_id = int(query.data.replace("toggle_strategy_", ""))
+    except ValueError:
+        await query.answer("Invalid strategy ID.")
+        return
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Cambiar estado activo
     c.execute('''
         UPDATE strategies
         SET active = CASE WHEN active = 1 THEN 0 ELSE 1 END
-        WHERE user_id = ? AND strategy_name = ?
-    ''', (user_id, strategy_name))
+        WHERE user_id = ? AND id = ?
+    ''', (user_id, strategy_id))
     conn.commit()
     conn.close()
 
-    await query.answer(f"Toggled {strategy_name}")
-    await strategies(update, context)  # Refrescar lista
+    await query.answer(f"Toggled strategy ID {strategy_id}")
+    await my_strategies_command(update, context) # Refresh the strategies list
 
+
+# New function to browse strategies from the folder
+async def browse_strategies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    keyboard = []
+    text = "📈 *Available Strategy Presets:*\n\n"
+
+    try:
+        # List .py files in core/strategies, excluding strategies.py itself
+        strategy_files = [f for f in os.listdir(STRATEGIES_FOLDER) if f.endswith('.py') and f != 'strategies.py' and f != '__init__.py']
+
+        if not strategy_files:
+            text += "No strategy preset files found."
+        else:
+            for filename in sorted(strategy_files):
+                # Extract a friendly name from the filename (e.g., 'dca_strategy.py' -> 'DCA Strategy')
+                friendly_name = re.sub(r'_strategy\.py$', '', filename).replace('_', ' ').title()
+                # Placeholder for now: clicking these buttons won't do anything specific yet
+                keyboard.append([InlineKeyboardButton(friendly_name, callback_data=f"preset_strategy_{filename}")])
+
+        keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            text, reply_markup=reply_markup, parse_mode='Markdown'
+        )
+    except FileNotFoundError:
+        await query.edit_message_text(
+            "⚠️ Strategy presets folder not found. Please check bot configuration.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]])
+        )
+    except Exception as e:
+        await query.edit_message_text(
+            f"⚠️ Error listing strategies: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]])
+        )
+
+
+# New placeholder handler for clicking a preset strategy button
+async def handle_preset_strategy_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    filename = query.data.replace("preset_strategy_", "")
+    await query.answer(f"'{filename}' selected. Functionality coming soon!")
+    # Optionally, you could edit the message to provide more details about the selected strategy
+    # await query.edit_message_text(f"Details for {filename} coming soon!")
+
+
+# Handlers for chart generation
+async def view_pnl_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer("Generating PnL graph...")
+
+    pnl_chart_buffer, _ = generate_charts(user_id) # generate_charts returns two buffers
+
+    if pnl_chart_buffer:
+        # Send the chart as a photo
+        await query.message.reply_photo(photo=pnl_chart_buffer, caption="📈 Your PnL by Strategy")
+        # Go back to situation menu after sending photo
+        await my_strategies_situation(update, context)
+    else:
+        await query.edit_message_text(
+            "❌ No active strategies found to generate PnL graph. Create or activate some strategies first!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to My Strategies", callback_data='my_strategies')]])
+        )
+
+
+async def view_exposure_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer("Generating Exposure pie chart...")
+
+    _, exposure_chart_buffer = generate_charts(user_id) # generate_charts returns two buffers
+
+    if exposure_chart_buffer:
+        # Send the chart as a photo
+        await query.message.reply_photo(photo=exposure_chart_buffer, caption="🥧 Your Portfolio Exposure by Strategy")
+        # Go back to situation menu after sending photo
+        await my_strategies_situation(update, context)
+    else:
+        await query.edit_message_text(
+            "❌ No active strategies found to generate Exposure chart. Create or activate some strategies first!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to My Strategies", callback_data='my_strategies')]])
+        )
+
+
+# The following strategy configuration functions are kept but not exposed via UI buttons
+# for future use. The ConversationHandler entry point in main.py will be removed.
+# (These remain unchanged from previous corrected version)
 async def configure_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.edit_message_text(
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
         "📛 Send the name of the new strategy:"
     )
     return WAITING_STRATEGY_NAME
@@ -148,28 +255,43 @@ async def receive_strategy_coins(update: Update, context: ContextTypes.DEFAULT_T
 
 async def receive_strategy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    name = context.user_data['strategy_name']
-    coins = context.user_data['coins']
+    name = context.user_data.get('strategy_name')
+    coins = context.user_data.get('coins')
+
+    if not name or not coins:
+        await update.message.reply_text("❌ Strategy name or coins missing. Please start over.")
+        context.user_data.pop('strategy_name', None)
+        context.user_data.pop('coins', None)
+        return ConversationHandler.END
+
     try:
         amount = float(update.message.text.strip())
+        if amount <= 0:
+            await update.message.reply_text("⚠️ Amount must be positive. Please enter a valid numeric value.")
+            return WAITING_STRATEGY_AMOUNT
     except ValueError:
         await update.message.reply_text("⚠️ Invalid amount. Please enter a numeric value.")
         return WAITING_STRATEGY_AMOUNT
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''
-        INSERT INTO strategies (user_id, strategy_name, invested_amount, pnl_percent, active)
-        VALUES (?, ?, ?, 0.0, 1)
-    ''', (user_id, f"{name} ({coins})", amount))
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text(
-        f"✅ Strategy *{name}* added and activated!",
-        parse_mode='Markdown'
-    )
-    return ConversationHandler.END
+    try:
+        c.execute('''
+            INSERT INTO strategies (user_id, strategy_name, coins, invested_amount, pnl_percent, active)
+            VALUES (?, ?, ?, ?, 0.0, 1)
+        ''', (user_id, f"{name} ({coins})", coins, amount))
+        conn.commit()
+        await update.message.reply_text(
+            f"✅ Strategy *{name}* added and activated!",
+            parse_mode='Markdown'
+        )
+    except sqlite3.Error as e:
+        await update.message.reply_text(f"⚠️ Error saving strategy: {str(e)}")
+    finally:
+        conn.close()
+        context.user_data.pop('strategy_name', None)
+        context.user_data.pop('coins', None)
+        return ConversationHandler.END
 
 
 # Get Symbol Data (live API)
@@ -187,22 +309,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = get_symbol_data(symbol)
         await update.message.reply_text(data, parse_mode='Markdown')
     else:
-        # This else block will now correctly only be hit if no ConversationHandler or specific state is active
-        await update.message.reply_text("⚠️ Please use the menu buttons.")
+        await update.message.reply_text("⚠️ Please use the menu buttons or /start.")
 
 
 # Placeholders
 async def backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_placeholder(update, "🔁 Backtest module coming soon...")
+    await send_placeholder(update, "🔁 Backtest module coming soon!")
 
 async def papertrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_placeholder(update, "🧪 Papertrade module coming soon...")
+    await send_placeholder(update, "🧪 Papertrade module coming soon!")
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_placeholder(update, "📈 Signals module coming soon...")
+    await send_placeholder(update, "📈 Signals module coming soon!")
 
 async def indicators(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_placeholder(update, "📉 Indicators module coming soon...")
+    await send_placeholder(update, "📉 Indicators module coming soon!")
 
 async def send_placeholder(update: Update, message: str):
     keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]]
@@ -211,7 +332,6 @@ async def send_placeholder(update: Update, message: str):
 
 
 # Connect API keys conversation flow
-# Step 1: Start connection flow
 async def connect_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -219,39 +339,36 @@ async def connect_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔗 Please send me your *Binance API key*:",
         parse_mode='Markdown'
     )
-    return WAITING_API_KEY # <-- CRITICAL FIX: Removed quotes! Now returns the integer variable.
+    return WAITING_API_KEY
 
-# Step 2: Receive API key
 async def receive_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['api_key'] = update.message.text.strip()
     await update.message.reply_text(
         "🔗 Now please send me your *Binance API secret*:",
         parse_mode='Markdown'
     )
-    return WAITING_API_SECRET # <-- CRITICAL FIX: Removed quotes! Now returns the integer variable.
+    return WAITING_API_SECRET
 
-# Step 3: Receive API secret and save
 async def receive_api_secret(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api_secret = update.message.text.strip()
     user_id = update.effective_user.id
-    api_key = context.user_data.get('api_key') # <-- CRITICAL FIX: Retrieve api_key from user_data
+    api_key = context.user_data.get('api_key')
 
     if not api_key:
         await update.message.reply_text("❌ API key is missing. Please start over with the 'Connect API Keys' button.")
-        if 'api_key' in context.user_data: # Clean up
+        if 'api_key' in context.user_data:
             del context.user_data['api_key']
         return ConversationHandler.END
 
     try:
-        # Encrypt and save API keys
         enc_key = encrypt_api_key(api_key)
-        enc_secret = encrypt_api_key(api_secret) # <-- CRITICAL FIX: Changed to encrypt_api_key
+        enc_secret = encrypt_api_key(api_secret)
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute(
             "INSERT OR REPLACE INTO users (telegram_id, api_key, api_secret) VALUES (?, ?, ?)",
-            (user_id, enc_key, enc_secret) # <-- Use user_id variable
+            (user_id, enc_key, enc_secret)
         )
         conn.commit()
         conn.close()
@@ -260,7 +377,6 @@ async def receive_api_secret(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error saving API keys: {str(e)}")
     finally:
-        # Clean up user_data regardless of success or failure
         if 'api_key' in context.user_data:
             del context.user_data['api_key']
         return ConversationHandler.END
@@ -274,8 +390,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'portfolio':
         await portfolio(update, context)
-    elif data == 'strategies':
-        await strategies(update, context)
     elif data == 'backtest':
         await backtest(update, context)
     elif data == 'papertrade':
@@ -288,21 +402,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await get_symbol(update, context)
     elif data == 'back_to_menu':
         await start(update, context)
+    elif data == 'my_strategies':
+        await my_strategies_command(update, context)
+    elif data == 'my_strategies_situation': # Handle the new 'Situation' button
+        await my_strategies_situation(update, context)
+    elif data == 'browse_strategies': # Handle the new 'Browse Strategies' button
+        await browse_strategies_command(update, context)
+    elif data.startswith('toggle_strategy_'):
+        await toggle_strategy(update, context)
+    elif data == 'view_pnl_graph':
+        await view_pnl_graph(update, context)
+    elif data == 'view_exposure_chart':
+        await view_exposure_chart(update, context)
     elif data == 'connect_api':
-        # This will call connect_start, which is the entry_point for the ConversationHandler
-        # The ConversationHandler itself will then take over.
         await connect_start(update, context)
+    elif data.startswith('preset_strategy_'): # Handle clicks on preset strategy files
+        await handle_preset_strategy_click(update, context)
     else:
         await query.edit_message_text("⚠️ Unknown command.")
-
 
 # Show help message
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📖 *m‑vault Commands:*\n"
+        "📖 *M-VAULT Commands:*\n"
         "/start - Start the bot and show menu\n"
         "/help - Show this help message\n"
-        # <-- CRITICAL FIX: Updated help message
         "To connect API keys, use the '🔗 Connect API Keys' button in the main menu (/start).\n"
         "\nUse the menu buttons to navigate modules.",
         parse_mode='Markdown'
