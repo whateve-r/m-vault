@@ -10,6 +10,8 @@ from telegram import InlineQueryResultArticle, InputTextMessageContent
 from core.market import get_symbol_data, EXCHANGE_SYMBOLS, fetch_historical_data
 from core.analyzer import generate_pnl_graph, generate_exposure_chart, generate_candlestick_chart
 
+from telegram.helpers import escape_markdown
+
 from core.portfolio import get_portfolio_summary
 from core.strategies.strategies import get_strategies_data, generate_charts
 from core.market import get_symbol_data # Make sure this is imported
@@ -18,35 +20,42 @@ from core.vault import encrypt_api_key, decrypt_api_key
 # NEW: Import for Signals and Indicators backend (placeholders for now)
 # We'll use these in the next step, but declare the imports now.
 # Make sure core/signals.py and core/indicators.py exist, even if empty or with placeholder functions.
-try:
-    from core.signals import analyze_signal
-except ImportError:
-    # Placeholder if core/signals/analyze_signal.py doesn't exist yet
-    # NOTE: If this placeholder is called, it won't be awaited.
-    # Ensure your actual analyze_signal in core/signals.py is async def!
-    def analyze_signal(symbol: str) -> str:
-        return f"📈 Signal analysis for {symbol} is coming soon!"
 
-try:
-    from core.indicators import generate_indicator_chart
-except ImportError:
-    # Placeholder if core/indicators.py doesn't exist yet
-    # NOTE: If this placeholder is called, it won't be awaited.
-    # Ensure your actual generate_indicator_chart in core/indicators.py is async def!
-    def generate_indicator_chart(symbol: str, indicator_type: str):
-        return None, f"📉 Indicator chart for {symbol} ({indicator_type}) is coming soon!"
+# Core imports for market data, indicators, and signals
+from core.market import fetch_historical_data # Make sure this is imported if not already
+from core.indicators import calculate_indicators, generate_indicator_chart # Ensure calculate_indicators is also here
+from core.signals import generate_signals # This is your new signal function
 
+# Your existing imports like pandas, numpy should also be present if used below
+import pandas as pd
+import numpy as np
+
+# Ensure constants are imported for consistency with signal/indicator logic
+from bot.constants import ( # Assuming your constants.py is in bot/
+    SMA_FAST_PERIOD, SMA_SLOW_PERIOD, RSI_PERIOD, RSI_OVERBOUGHT, RSI_OVERSOLD
+)
 
 from bot.constants import (
     WAITING_API_KEY, WAITING_API_SECRET, WAITING_STRATEGY_NAME, WAITING_STRATEGY_COINS, WAITING_STRATEGY_AMOUNT,
     # New states for Technical Analysis, ensure these are in your constants.py
     WAITING_SIGNAL_SYMBOL, WAITING_INDICATOR_CHOICE, WAITING_INDICATOR_SYMBOL,
-    WAITING_TIMEFRAME_CHOICE, WAITING_GRAPH_CONFIRMATION
+    WAITING_TIMEFRAME_CHOICE, WAITING_GRAPH_CONFIRMATION, DEFAULT_LIMIT, DEFAULT_TIMEFRAME
 )
 
 DB_PATH = os.getenv("DB_PATH", "data/db.sqlite")
 STRATEGIES_FOLDER = "core/strategies/"
 SIGNALS_FOLDER = "core/signals/" # Path to signals folder (for listing, not direct import)
+
+import ccxt # Add this import if you don't have it already, for type hinting
+
+# --- Helper to get exchange instance ---
+def get_exchange_instance(context: ContextTypes.DEFAULT_TYPE):
+    """Retrieves the globally stored CCXT exchange instance."""
+    exchange = context.application.bot_data.get('exchange')
+    if not exchange:
+        print("Error: CCXT exchange instance not found in bot_data. Is post_init_setup in main.py working correctly?")
+        # You might want to raise an exception or handle this more robustly
+    return exchange
 
 
 # --- Main Menu & Core Commands ---
@@ -371,9 +380,34 @@ async def get_symbol_by_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 # NEW FUNCTION: Display symbol data and then offer timeframe options
 async def display_symbol_data_and_timeframe_options(update: Update, context: ContextTypes.DEFAULT_TYPE, symbol: str):
-    data_text = await get_symbol_data(symbol) # Call your existing get_symbol_data from core/market.py
+    """
+    Displays current data for a given symbol and then presents options to select a timeframe
+    to view its historical chart.
+    """
+    # 1. Retrieve the exchange instance
+    exchange = get_exchange_instance(context) # Assumes get_exchange_instance is defined in this file
+    if not exchange:
+        # If exchange is not initialized/available, inform the user and end the conversation
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]])
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                "❌ Market data exchange not initialized. Please try again later or contact support.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        elif update.message:
+            await update.message.reply_text(
+                "❌ Market data exchange not initialized. Please try again later or contact support.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        return ConversationHandler.END # End the current conversation flow
 
-    # Store the symbol for later use in timeframe selection
+    # 2. Call your existing get_symbol_data from core/market.py, passing the exchange instance
+    # Assuming get_symbol_data now accepts 'exchange' as its first argument
+    data_text = await get_symbol_data(exchange, symbol)
+
+    # Store the symbol for later use in timeframe selection by handle_timeframe_selection
     context.user_data['current_symbol_for_chart'] = symbol
 
     # Create keyboard for timeframes
@@ -385,6 +419,7 @@ async def display_symbol_data_and_timeframe_options(update: Update, context: Con
     timeframe_keyboard_rows.append([InlineKeyboardButton("🔙 Back to Symbol Options", callback_data='symbol')])
     reply_markup = InlineKeyboardMarkup(timeframe_keyboard_rows)
 
+    # Determine whether to edit an existing message or send a new one
     if update.callback_query:
         await update.callback_query.edit_message_text(
             data_text + "\n\nSelect a timeframe to view the chart:",
@@ -397,10 +432,12 @@ async def display_symbol_data_and_timeframe_options(update: Update, context: Con
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+    
     # Set the state for the conversation handler to wait for timeframe choice
+    # This ensures that the next message (a callback from timeframe selection)
+    # is handled by handle_timeframe_selection.
     context.user_data['awaiting_text_input_for'] = 'none' # Clear previous text input flag
-    return WAITING_TIMEFRAME_CHOICE
-
+    return WAITING_TIMEFRAME_CHOICE # Return the state to continue the conversation
 
 # NEW FUNCTION: Handle timeframe selection and generate graph
 async def handle_timeframe_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -410,6 +447,15 @@ async def handle_timeframe_selection(update: Update, context: ContextTypes.DEFAU
     timeframe = query.data.replace('timeframe_', '')
     symbol = context.user_data.get('current_symbol_for_chart')
 
+    # 1. Retrieve the exchange instance
+    exchange = get_exchange_instance(context) # Assumes get_exchange_instance is defined in this file
+    if not exchange:
+        await query.edit_message_text(
+            "❌ Market data exchange not initialized. Please try again later.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]])
+        )
+        return ConversationHandler.END
+
     if not symbol:
         await query.edit_message_text("❌ Error: No symbol selected. Please start over from 'Get Symbol Data'.",
                                       reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]]))
@@ -417,10 +463,15 @@ async def handle_timeframe_selection(update: Update, context: ContextTypes.DEFAU
 
     await query.edit_message_text(f"Generating *{timeframe}* chart for *{symbol}*...", parse_mode='Markdown')
 
-    ohlcv_data = await fetch_historical_data(symbol, timeframe)
+    # 2. Pass the exchange instance to fetch_historical_data
+    ohlcv_data = await fetch_historical_data(exchange, symbol, timeframe, DEFAULT_LIMIT)
 
-    if ohlcv_data:
+    if not ohlcv_data.empty:
+        # calculate_indicators and generate_candlestick_chart typically do not need the exchange instance
+        # unless your specific implementation makes them do more than just process the DataFrame.
+        df_with_indicators = calculate_indicators(ohlcv_data.copy())
         chart_buffer = generate_candlestick_chart(symbol, timeframe, ohlcv_data)
+        
         if chart_buffer:
             await query.message.reply_photo(photo=chart_buffer, caption=f"📈 {symbol} {timeframe} Candlestick Chart")
             keyboard = [[InlineKeyboardButton("🔙 Back to Timeframes", callback_data='view_timeframes')]] # New button to go back to timeframe selection
@@ -435,6 +486,82 @@ async def handle_timeframe_selection(update: Update, context: ContextTypes.DEFAU
         await query.message.reply_text("❌ Could not fetch historical data for this symbol and timeframe. It might be unavailable.",
                                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Timeframes", callback_data='view_timeframes')]]))
         return ConversationHandler.END
+
+
+# --- New Function for Signal Analysis Logic ---
+# CORRECTED: Added 'exchange' as the first argument
+async def handle_signal_analysis_logic(exchange: ccxt.Exchange, symbol: str, timeframe: str = DEFAULT_TIMEFRAME, limit: int = DEFAULT_LIMIT):
+    """
+    Performs comprehensive market analysis for a given symbol,
+    including historical data, indicators, and trading signals.
+    This function returns the necessary text and an optional chart buffer.
+    """
+    try:
+        # 1. Fetch Historical Data - Now correctly passing the exchange object
+        print(f"Fetching historical data for {symbol} ({timeframe}, {limit} candles)...")
+        ohlcv_df = await fetch_historical_data(exchange, symbol, timeframe, limit) # Pass exchange here
+
+        if ohlcv_df.empty:
+            return None, f"❌ No historical data found for *{symbol}* with timeframe *{timeframe}*."
+
+        # 2. Calculate Indicators
+        print(f"Calculating indicators for {symbol}...")
+        df_with_indicators = calculate_indicators(ohlcv_df.copy())
+
+        if df_with_indicators.empty:
+            return None, f"❌ Failed to calculate indicators for *{symbol}*."
+
+        # 3. Generate Signals
+        print(f"Generating signals for {symbol}...")
+        df_with_signals = generate_signals(df_with_indicators.copy())
+
+        if df_with_signals.empty or 'Signal' not in df_with_signals.columns:
+            return None, f"❌ Failed to generate trading signals for *{symbol}*."
+
+        # Get the latest data point for reporting
+        latest_data = df_with_signals.iloc[-1]
+        latest_price = latest_data['Close']
+        latest_signal = latest_data['Signal']
+
+        response_text = (
+            f"📊 *Market Analysis for {symbol} ({timeframe})*\n"
+            f"Current Price: `${latest_price:.2f}`\n"
+            f"🔥 *Latest Signal: {latest_signal}*\n\n"
+            "--- Indicator Details (Latest Candle) ---\n"
+        )
+
+        # Add some key indicator values to the message for context
+        # Check if indicators exist before adding them
+        if f'SMA_Fast_{SMA_FAST_PERIOD}' in latest_data and not pd.isna(latest_data[f'SMA_Fast_{SMA_FAST_PERIOD}']):
+            response_text += f"SMA ({SMA_FAST_PERIOD}): `{latest_data[f'SMA_Fast_{SMA_FAST_PERIOD}']:.2f}`\n"
+        if f'SMA_Slow_{SMA_SLOW_PERIOD}' in latest_data and not pd.isna(latest_data[f'SMA_Slow_{SMA_SLOW_PERIOD}']):
+            response_text += f"SMA ({SMA_SLOW_PERIOD}): `{latest_data[f'SMA_Slow_{SMA_SLOW_PERIOD}']:.2f}`\n"
+        if f'RSI_{RSI_PERIOD}' in latest_data and not pd.isna(latest_data[f'RSI_{RSI_PERIOD}']):
+            response_text += f"RSI ({RSI_PERIOD}): `{latest_data[f'RSI_{RSI_PERIOD}']:.2f}`\n"
+        if 'MACD' in latest_data and 'MACD_Signal' in latest_data and not pd.isna(latest_data['MACD']):
+            response_text += f"MACD: `{latest_data['MACD']:.2f}` (Signal: `{latest_data['MACD_Signal']:.2f}`)\n"
+        if 'BB_Middle' in latest_data and not pd.isna(latest_data['BB_Middle']):
+            response_text += f"BBands (Mid): `{latest_data['BB_Middle']:.2f}` (Upper: `{latest_data['BB_Upper']:.2f}`, Lower: `{latest_data['BB_Lower']:.2f}`)\n"
+
+        # Generate a chart for a key indicator, e.g., MACD or RSI
+        chart_buffer = None
+        chart_caption = None
+        if 'MACD' in df_with_signals.columns and 'MACD_Signal' in df_with_signals.columns:
+            # CORRECTED: Pass exchange here too
+            chart_buffer, chart_caption = await generate_indicator_chart(exchange, symbol, 'MACD', df_with_signals)
+        elif f'RSI_{RSI_PERIOD}' in df_with_signals.columns:
+            # CORRECTED: Pass exchange here too
+            chart_buffer, chart_caption = await generate_indicator_chart(exchange, symbol, 'RSI', df_with_signals)
+        # Add more logic here if you want to prioritize other charts or generate multiple
+
+        return chart_buffer, response_text
+
+    except Exception as e:
+        print(f"Error during market analysis for {symbol}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, f"❌ An error occurred during market analysis for *{symbol}*: {str(e)}"
+
 
 # New function to re-display timeframe options (used by "Back to Timeframes" button)
 async def view_timeframes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -569,53 +696,100 @@ async def receive_api_secret(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
 
-# --- General Text Handler ---
+# This `handle_text` function will be called when the user sends a text message
+# within certain conversation states. It needs to correctly dispatch based on
+# the `context.user_data['awaiting_text_input_for']` flag.
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handles all general text messages from the user, differentiating based on context.user_data flags.
-    This function should be the handler for MessageHandler(filters.TEXT & ~filters.COMMAND, ...)
-    """
-    user_input = update.message.text.upper()
-    current_state_purpose = context.user_data.get('awaiting_text_input_for')
+    user_input = update.message.text.strip()
+    awaiting_for = context.user_data.get('awaiting_text_input_for')
 
-    # Handle custom symbol input for 'Get Symbol Data'
-    if current_state_purpose == 'get_symbol_data':
-        context.user_data.pop('awaiting_text_input_for', None)
-        next_state = await display_symbol_data_and_timeframe_options(update, context, user_input)
-        return next_state # <--- THIS IS THE CRITICAL CHANGE
+    # Retrieve the exchange instance for handlers that need it
+    exchange = get_exchange_instance(context)
+    if not exchange and awaiting_for in ['get_symbol_data', 'signal_analysis', 'indicator_chart']:
+        await update.message.reply_text("❌ Market data exchange not initialized. Please try again later or contact support.")
+        context.user_data['awaiting_text_input_for'] = 'none' # Reset flag
+        return ConversationHandler.END
 
-    # Handle symbol input for Signal Analysis
-    elif current_state_purpose == 'signal_analysis':
-        context.user_data.pop('awaiting_text_input_for', None)
-        signal_result = await analyze_signal(user_input) # Call the backend signal analysis function
-        keyboard = [[InlineKeyboardButton("🔙 Back to Analysis Tools", callback_data='technical_analysis')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(signal_result, reply_markup=reply_markup, parse_mode='Markdown')
-        return ConversationHandler.END # End the conversation
+    if awaiting_for == 'get_symbol_data':
+        # User entered a custom symbol for get_symbol_data
+        symbol = user_input
+        # Delegate to display_symbol_data_and_timeframe_options
+        return await display_symbol_data_and_timeframe_options(update, context, symbol)
 
-    # Handle symbol input for Indicator Chart generation
-    elif current_state_purpose == 'indicator_chart':
-        indicator_type = context.user_data.pop('selected_indicator_type', 'unknown')
-        context.user_data.pop('awaiting_text_input_for', None)
+    elif awaiting_for == 'signal_analysis':
+        symbol_for_analysis = user_input.upper()
+        await update.message.reply_text(f"Performing signal analysis for *{symbol_for_analysis}*... Please wait.", parse_mode='Markdown')
 
-        await update.message.reply_text(f"Generating *{indicator_type.upper()}* chart for *{user_input}*...", parse_mode='Markdown')
-        chart_buffer, info_text = await generate_indicator_chart(user_input, indicator_type) # Call the backend indicator function
+        # Pass the exchange object to handle_signal_analysis_logic
+        chart_buffer, response_text = await handle_signal_analysis_logic(
+            exchange, # Pass the exchange instance
+            symbol_for_analysis,
+            DEFAULT_TIMEFRAME,
+            DEFAULT_LIMIT
+        )
 
-        if chart_buffer:
-            await update.message.reply_photo(photo=chart_buffer, caption=info_text, parse_mode='Markdown')
-            keyboard = [[InlineKeyboardButton("🔙 Back to Indicators List", callback_data='indicators_list')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text("Here is your chart:", reply_markup=reply_markup, parse_mode='Markdown')
+        if response_text:
+            if chart_buffer and len(response_text) > 1024:
+                # Telegram caption limit is 1024 chars, split if necessary
+                await update.message.reply_photo(photo=chart_buffer, caption=response_text[:1020] + "...", parse_mode='Markdown')
+                await update.message.reply_text("*(Continued)*\n" + response_text[1020:], parse_mode='Markdown')
+            elif chart_buffer:
+                await update.message.reply_photo(photo=chart_buffer, caption=response_text, parse_mode='Markdown')
+            else:
+                await update.message.reply_text(response_text, parse_mode='Markdown')
+        elif chart_buffer:
+            await update.message.reply_photo(photo=chart_buffer, caption=f"Chart for {symbol_for_analysis} Signal Analysis")
         else:
-            keyboard = [[InlineKeyboardButton("🔙 Back to Indicators List", callback_data='indicators_list')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(f"❌ Error generating chart: {info_text}", reply_markup=reply_markup, parse_mode='Markdown')
-        return ConversationHandler.END # End the conversation
+            await update.message.reply_text("Could not perform signal analysis for the given symbol or an error occurred.", parse_mode='Markdown')
 
-    # Default fallback if no specific waiting state is active
-    else:
-        await update.message.reply_text("⚠️ Please use the menu buttons or /start to interact with the bot.")
-        return ConversationHandler.END # End any ambiguous conversation
+        keyboard = [[InlineKeyboardButton("🔙 Back to Technical Analysis", callback_data='technical_analysis')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Analysis complete.", reply_markup=reply_markup)
+
+        context.user_data['awaiting_text_input_for'] = 'none' # Reset flag
+        return ConversationHandler.END # End the conversation flow
+
+    elif awaiting_for == 'indicator_chart':
+        symbol_for_chart = user_input.upper()
+        indicator_type = context.user_data.get('selected_indicator_type')
+
+        if not indicator_type:
+            await update.message.reply_text("❌ Error: No indicator type selected. Please start over from 'Chart Indicators'.")
+            context.user_data['awaiting_text_input_for'] = 'none'
+            return ConversationHandler.END
+
+        await update.message.reply_text(f"Generating *{indicator_type.upper()}* chart for *{symbol_for_chart}*...", parse_mode='Markdown')
+
+        # Fetch historical data for indicators, ensure exchange is passed
+        ohlcv_data = await fetch_historical_data(exchange, symbol_for_chart, DEFAULT_TIMEFRAME, DEFAULT_LIMIT)
+
+        if not ohlcv_data.empty:
+            df_with_indicators = calculate_indicators(ohlcv_data.copy())
+
+            # Pass the exchange object to generate_indicator_chart
+            chart_buffer, info_text = await generate_indicator_chart(exchange, symbol_for_chart, indicator_type, df_with_indicators, timeframe)
+
+            if chart_buffer:
+                await update.message.reply_photo(photo=chart_buffer, caption=info_text, parse_mode='Markdown')
+            else:
+                await update.message.reply_text(info_text, parse_mode='Markdown')
+
+            keyboard = [[InlineKeyboardButton("🔙 Back to Indicators", callback_data='indicators_list')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text("Chart generation complete.", reply_markup=reply_markup)
+        else:
+            await update.message.reply_text("❌ Could not fetch historical data to generate the indicator chart. It might be unavailable.", parse_mode='Markdown')
+            keyboard = [[InlineKeyboardButton("🔙 Back to Indicators", callback_data='indicators_list')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text("Please try again.", reply_markup=reply_markup)
+
+        context.user_data['awaiting_text_input_for'] = 'none' # Reset flag
+        return ConversationHandler.END
+
+    # Fallback for unhandled text messages
+    await update.message.reply_text("I'm not sure what to do with that. Please use the menu buttons or commands.")
+    return ConversationHandler.END
+
 
 # --- General Button Handler ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
