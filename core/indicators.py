@@ -1,56 +1,103 @@
-from io import BytesIO
-import matplotlib.pyplot as plt
-import numpy as np
+import pandas as pd
+import talib # The Python wrapper for TA-Lib
+from constants import (
+    SMA_FAST_PERIOD, SMA_SLOW_PERIOD,
+    RSI_PERIOD, RSI_OVERBOUGHT, RSI_OVERSOLD
+)
 
-def generate_indicator_chart(symbol: str, indicator_type: str):
+def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Generates a dummy chart for an indicator.
-    In a real scenario, this would fetch historical data and calculate the indicator.
+    Calculates various technical indicators and adds them as new columns to the DataFrame.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing OHLCV data with 'Open', 'High', 'Low', 'Close', 'Volume' columns.
+
+    Returns:
+        pd.DataFrame: The DataFrame with added indicator columns. Returns an empty DataFrame if input is empty.
     """
+    if df.empty:
+        print("Input DataFrame for indicator calculation is empty.")
+        return pd.DataFrame()
+
+    # Ensure necessary columns exist and are numeric
+    required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+    for col in required_columns:
+        if col not in df.columns:
+            print(f"Missing required column '{col}' for indicator calculation.")
+            return pd.DataFrame()
+        # Ensure column is numeric for TA-Lib operations
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Drop rows with NaN values that might result from 'coerce' or initial data issues
+    df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'], inplace=True)
+    if df.empty:
+        print("DataFrame became empty after dropping NaN values. Cannot calculate indicators.")
+        return pd.DataFrame()
+
+    # Convert columns to numpy arrays for TA-Lib (talib expects numpy arrays)
+    open_prices = df['Open'].values
+    high_prices = df['High'].values
+    low_prices = df['Low'].values
+    close_prices = df['Close'].values
+    volume_data = df['Volume'].values
+
+    # --- Moving Averages (SMA) ---
+    # Simple Moving Average (SMA) - Fast
+    df[f'SMA_Fast_{SMA_FAST_PERIOD}'] = talib.SMA(close_prices, timeperiod=SMA_FAST_PERIOD)
+    # Simple Moving Average (SMA) - Slow
+    df[f'SMA_Slow_{SMA_SLOW_PERIOD}'] = talib.SMA(close_prices, timeperiod=SMA_SLOW_PERIOD)
+
+    # --- Relative Strength Index (RSI) ---
+    df[f'RSI_{RSI_PERIOD}'] = talib.RSI(close_prices, timeperiod=RSI_PERIOD)
+
+    # --- Moving Average Convergence Divergence (MACD) ---
+    # Default fastperiod=12, slowperiod=26, signalperiod=9
+    macd, macdsignal, macdhist = talib.MACD(close_prices, fastperiod=12, slowperiod=26, signalperiod=9)
+    df['MACD'] = macd
+    df['MACD_Signal'] = macdsignal
+    df['MACD_Hist'] = macdhist
+
+    # --- Bollinger Bands (BBANDS) ---
+    # Default timeperiod=20, nbdevup=2, nbdevdn=2, matype=0 (SMA)
+    upperband, middleband, lowerband = talib.BBANDS(close_prices, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+    df['BB_Upper'] = upperband
+    df['BB_Middle'] = middleband
+    df['BB_Lower'] = lowerband
+
+    print("Technical indicators calculated successfully.")
+    return df
+
+# Example of how to use this function (for testing purposes)
+async def main_test_indicators():
+    # This example requires market.py's fetch_historical_data to work
+    from core.market import fetch_historical_data # Assuming market.py is in core/
+
+    # Need enough data for indicators (e.g., 200 candles for a 50-period SMA)
+    data = await fetch_historical_data('BTC/USDT', '1h', 200)
+    if not data.empty:
+        df_with_indicators = calculate_indicators(data)
+        if not df_with_indicators.empty:
+            print("\nSample Data with Indicators:")
+            # Display the last few rows and relevant indicator columns
+            print(df_with_indicators[[
+                'Close',
+                f'SMA_Fast_{SMA_FAST_PERIOD}',
+                f'SMA_Slow_{SMA_SLOW_PERIOD}',
+                f'RSI_{RSI_PERIOD}',
+                'MACD', 'MACD_Signal', 'MACD_Hist',
+                'BB_Upper', 'BB_Middle', 'BB_Lower'
+            ]].tail())
+
+if __name__ == '__main__':
+    # This block runs only when indicators.py is executed directly
     try:
-        # Dummy data for demonstration
-        dates = [f"Day {i+1}" for i in range(20)]
-        prices = np.random.rand(20) * 100 + 50 # Dummy prices
-
-        plt.figure(figsize=(10, 6))
-        plt.plot(dates, prices, label='Price', color='blue')
-
-        # Add dummy indicator line
-        if indicator_type == 'SMA':
-            plt.plot(dates, prices * 0.95, label='SMA', color='red', linestyle='--')
-            plt.title(f'{symbol} - Simple Moving Average (SMA)')
-        elif indicator_type == 'MACD':
-            # Dummy MACD lines
-            macd_line = prices * 0.1
-            signal_line = macd_line * 0.9
-            plt.plot(dates, macd_line - np.mean(macd_line), label='MACD Line', color='green')
-            plt.plot(dates, signal_line - np.mean(signal_line), label='Signal Line', color='orange', linestyle=':')
-            plt.title(f'{symbol} - Moving Average Convergence Divergence (MACD)')
-        elif indicator_type == 'BB':
-            # Dummy Bollinger Bands
-            mid_band = prices
-            upper_band = prices * 1.05
-            lower_band = prices * 0.95
-            plt.plot(dates, mid_band, label='Middle Band', color='purple')
-            plt.plot(dates, upper_band, label='Upper Band', color='gray', linestyle='-.')
-            plt.plot(dates, lower_band, label='Lower Band', color='gray', linestyle='-.')
-            plt.fill_between(dates, lower_band, upper_band, color='lightgray', alpha=0.3)
-            plt.title(f'{symbol} - Bollinger Bands (BB)')
-        else:
-            plt.title(f'{symbol} - {indicator_type} (Coming Soon!)')
-
-        plt.xlabel('Time')
-        plt.ylabel('Value')
-        plt.xticks(rotation=45)
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png')
-        buffer.seek(0)
-        plt.close()
-        return buffer, f"Here's your *{indicator_type.upper()}* chart for *{symbol}*."
+        import asyncio
+        asyncio.run(main_test_indicators())
+    except KeyboardInterrupt:
+        print("Indicator calculation test interrupted.")
+    except ImportError as e:
+        print(f"Error importing dependencies for direct test: {e}. Ensure 'core/market.py' exists and 'ccxt' is installed.")
     except Exception as e:
-        print(f"Error generating indicator chart: {e}")
-        return None, f"❌ Failed to generate {indicator_type.upper()} chart for *{symbol}*: {str(e)}"
+        print(f"An unexpected error occurred during indicator test: {e}")
+        import traceback
+        traceback.print_exc()

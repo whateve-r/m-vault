@@ -6,4 +6,6 @@ requests
 matplotlib
 python-binance
 numpy
+pandas
 nest_asyncio
+# manual instalation of ta-lib is required: LDFLAGS="-L/usr/local/lib" CFLAGS="-I/usr/local/include" pip install --no-cache-dir TA-Lib
