@@ -16,3 +16,7 @@ env/
 
 data/*.sqlite
 data/secret.key
+
+venv_new/
+.venv_new
+env_new/
